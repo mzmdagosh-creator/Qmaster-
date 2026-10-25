@@ -1,0 +1,6 @@
+{
+  "name": "EduBank MCQ",
+  "description": "Comprehensive Question Bank and MCQ Management Platform with interactive practice, exams, and role-based access control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

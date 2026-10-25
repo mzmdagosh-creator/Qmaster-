@@ -20,7 +20,7 @@ jobs:
         distribution: 'temurin'
 
     - name: Unzip project
-      run: unzip Qmaster-.zip -d android-project
+      run: unzip Qmaster--main.zip -d android-project
 
     - name: Make gradlew executable
       run: chmod +x android-project/gradlew

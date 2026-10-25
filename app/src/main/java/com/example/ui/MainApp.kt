@@ -1,12 +1,14 @@
 package com.example.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.*
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -14,12 +16,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.*
 import com.example.ui.components.RoleBadge
-import com.example.ui.components.UserSwitcherDialog
-import com.example.ui.screens.auth.AuthScreen
 import com.example.ui.screens.dashboards.*
 import com.example.ui.screens.profile.ProfileScreen
 import com.example.ui.screens.qbank.QuestionBankScreen
@@ -30,7 +29,7 @@ import kotlinx.coroutines.launch
 
 enum class AppDestination(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
     DASHBOARD("Dashboard", Icons.Default.Dashboard),
-    QUESTION_BANK("Questions", Icons.Default.MenuBook),
+    QUESTION_BANK("Questions", Icons.AutoMirrored.Filled.MenuBook),
     QUIZ_PRACTICE("Practice", Icons.Default.Bolt),
     PROFILE("Profile", Icons.Default.Person)
 }
@@ -40,9 +39,15 @@ enum class AppDestination(val label: String, val icon: androidx.compose.ui.graph
 fun MainApp(
     viewModel: MainViewModel,
     isDarkTheme: Boolean,
-    onToggleDarkTheme: (Boolean) -> Unit
+    onToggleDarkTheme: (Boolean) -> Unit,
+    onSignOut: () -> Unit
 ) {
+    // Subscribe to the real-time Firestore user profile flow so role changes in `users/{uid}` update live
+    val firestoreProfile by viewModel.firestoreUserProfile.collectAsStateWithLifecycle()
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
+    val isLoadingRole by viewModel.isLoadingRole.collectAsStateWithLifecycle()
+    val authError by viewModel.authError.collectAsStateWithLifecycle()
+
     val allUsers by viewModel.allUsers.collectAsStateWithLifecycle()
     val subjects by viewModel.subjects.collectAsStateWithLifecycle()
     val questions by viewModel.questions.collectAsStateWithLifecycle()
@@ -60,10 +65,8 @@ fun MainApp(
     val userAttempts by viewModel.userAttempts.collectAsStateWithLifecycle()
     val userRecommendations by viewModel.userRecommendations.collectAsStateWithLifecycle()
     val allRecommendations by viewModel.allRecommendations.collectAsStateWithLifecycle()
-    val authError by viewModel.authError.collectAsStateWithLifecycle()
 
     var currentDestination by remember { mutableStateOf(AppDestination.DASHBOARD) }
-    var showUserSwitcher by remember { mutableStateOf(false) }
 
     // Quiz workflow state
     var activeQuizQuestions by remember { mutableStateOf<List<QuestionWithOptions>?>(null) }
@@ -90,17 +93,49 @@ fun MainApp(
         }
     }
 
-    if (currentUser == null) {
-        AuthScreen(
-            onLogin = { id, pass -> viewModel.login(id, pass) },
-            onRegister = { u, e, p, d, r -> viewModel.register(u, e, p, d, r) },
-            onQuickLoginPersona = { uid -> viewModel.switchUserPersona(uid) },
-            errorMessage = authError
-        )
+    val user = currentUser ?: firestoreProfile?.toUserEntity()
+
+    if (user == null) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (isLoadingRole) {
+                    CircularProgressIndicator()
+                    Text(
+                        text = "Fetching your role from Firestore ('users/{uid}')...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                } else {
+                    Text(
+                        text = authError ?: "Unable to load user profile from Firestore.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = { viewModel.fetchAndEnsureFirestoreRole() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Retry")
+                        }
+                        OutlinedButton(onClick = onSignOut) {
+                            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Sign Out")
+                        }
+                    }
+                }
+            }
+        }
         return
     }
-
-    val user = currentUser!!
 
     // Active Quiz Screen
     if (activeQuizQuestions != null) {
@@ -159,13 +194,14 @@ fun MainApp(
                     }
                 },
                 actions = {
-                    TextButton(
-                        onClick = { showUserSwitcher = true },
-                        modifier = Modifier.testTag("topbar_switch_role_button")
+                    IconButton(
+                        onClick = onSignOut,
+                        modifier = Modifier.testTag("topbar_logout_button")
                     ) {
-                        Icon(Icons.Default.SwapHoriz, null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(user.displayName.substringBefore(" "), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Logout,
+                            contentDescription = "Sign Out"
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -211,10 +247,7 @@ fun MainApp(
                                 onUpdateRole = { uid, r -> viewModel.updateUserRole(uid, r) },
                                 onUpdateStatus = { uid, s -> viewModel.updateUserStatus(uid, s) },
                                 onNavigateToQuestions = { currentDestination = AppDestination.QUESTION_BANK },
-                                onNavigateToModeration = {
-                                    // Can switch to Moderator role or navigate
-                                    viewModel.switchUserPersona("usr_moderator")
-                                }
+                                onNavigateToModeration = { currentDestination = AppDestination.QUESTION_BANK }
                             )
                         }
                         UserRole.MODERATOR -> {
@@ -296,21 +329,10 @@ fun MainApp(
                         currentUser = user,
                         isDarkTheme = isDarkTheme,
                         onToggleDarkTheme = onToggleDarkTheme,
-                        onOpenUserSwitcher = { showUserSwitcher = true },
-                        onLogout = { viewModel.logout() }
+                        onLogout = onSignOut
                     )
                 }
             }
         }
-    }
-
-    if (showUserSwitcher) {
-        UserSwitcherDialog(
-            currentUser = currentUser,
-            allUsers = allUsers,
-            onSelectUser = { uid -> viewModel.switchUserPersona(uid) },
-            onLogout = { viewModel.logout() },
-            onDismiss = { showUserSwitcher = false }
-        )
     }
 }

@@ -1,49 +1,84 @@
 package com.example.ui.screens.auth
 
+import android.content.Context
+import android.util.Log
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.data.model.UserRole
-import com.example.ui.theme.*
+import androidx.credentials.Credential
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import com.example.R
+import com.example.ui.theme.EduBluePrimary
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.firebase.Firebase
+import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.auth.auth
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
 @Composable
 fun AuthScreen(
-    onLogin: (String, String) -> Unit,
-    onRegister: (String, String, String, String, UserRole) -> Unit,
-    onQuickLoginPersona: (String) -> Unit,
-    errorMessage: String?,
+    errorMessage: String? = null,
     modifier: Modifier = Modifier
 ) {
-    var selectedTab by remember { mutableStateOf(0) } // 0: Sign In, 1: Sign Up
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val credentialManager = remember { CredentialManager.create(context) }
+    val serverClientId = remember { context.getString(R.string.default_web_client_id) }
 
-    var identifier by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var isSigningIn by remember { mutableStateOf(false) }
+    var localError by remember { mutableStateOf<String?>(null) }
 
-    var regUsername by remember { mutableStateOf("") }
-    var regEmail by remember { mutableStateOf("") }
-    var regPassword by remember { mutableStateOf("") }
-    var regDisplayName by remember { mutableStateOf("") }
-    var regRole by remember { mutableStateOf(UserRole.MEMBER) }
+    // 1. Silent Auto-Sign-In on Launch (Returning Users Only)
+    LaunchedEffect(Unit) {
+        val googleIdOption = GetGoogleIdOption.Builder()
+            .setFilterByAuthorizedAccounts(true)
+            .setServerClientId(serverClientId)
+            .setAutoSelectEnabled(true)
+            .build()
+
+        val request = GetCredentialRequest.Builder()
+            .addCredentialOption(googleIdOption)
+            .build()
+
+        try {
+            val result = credentialManager.getCredential(context, request)
+            handleSignInResult(result.credential)
+        } catch (e: GetCredentialCancellationException) {
+            Log.w("Auth", "Silent sign-in cancelled by user", e)
+        } catch (e: GetCredentialException) {
+            Log.w("Auth", "No authorized accounts for silent sign-in", e)
+        } catch (e: Exception) {
+            Log.w("Auth", "Silent sign-in failed", e)
+        }
+    }
 
     val scrollState = rememberScrollState()
+    val displayError = errorMessage ?: localError
 
     Column(
         modifier = modifier
@@ -51,216 +86,183 @@ fun AuthScreen(
             .verticalScroll(scrollState)
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(18.dp)
+        verticalArrangement = Arrangement.Center
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
         // App Logo & Header
         Box(
             modifier = Modifier
-                .size(64.dp)
-                .background(EduBluePrimary, RoundedCornerShape(16.dp)),
+                .size(72.dp)
+                .background(EduBluePrimary, RoundedCornerShape(18.dp)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Default.School,
-                contentDescription = null,
+                contentDescription = "EduBank Logo",
                 tint = Color.White,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(40.dp)
             )
         }
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         Text(
             text = "EduBank MCQ Platform",
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.ExtraBold,
-            color = MaterialTheme.colorScheme.onSurface
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center
         )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         Text(
             text = "Question Bank & Role-Based MCQ Management",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
         )
 
+        Spacer(modifier = Modifier.height(24.dp))
+
         // Error message if present
-        if (!errorMessage.isNullOrBlank()) {
+        if (!displayError.isNullOrBlank()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(10.dp))
-                    .padding(12.dp)
+                    .background(MaterialTheme.colorScheme.errorContainer, RoundedCornerShape(12.dp))
+                    .padding(14.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.Error, null, tint = MaterialTheme.colorScheme.error)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Error,
+                        contentDescription = "Authentication Error",
+                        tint = MaterialTheme.colorScheme.error
+                    )
                     Text(
-                        text = errorMessage,
+                        text = displayError,
                         color = MaterialTheme.colorScheme.onErrorContainer,
-                        fontSize = 12.sp
+                        fontSize = 13.sp
                     )
                 }
             }
+            Spacer(modifier = Modifier.height(16.dp))
         }
 
-        // Tabs
-        TabRow(
-            selectedTabIndex = selectedTab,
-            containerColor = Color.Transparent,
-            modifier = Modifier.fillMaxWidth()
+        // Security & Role-Based Access Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
+            border = CardDefaults.outlinedCardBorder()
         ) {
-            Tab(
-                selected = selectedTab == 0,
-                onClick = { selectedTab = 0 },
-                text = { Text("Sign In", fontWeight = FontWeight.Bold) }
-            )
-            Tab(
-                selected = selectedTab == 1,
-                onClick = { selectedTab = 1 },
-                text = { Text("Create Account", fontWeight = FontWeight.Bold) }
-            )
-        }
-
-        if (selectedTab == 0) {
-            // Sign In Form
-            OutlinedTextField(
-                value = identifier,
-                onValueChange = { identifier = it },
-                label = { Text("Email or Username") },
-                leadingIcon = { Icon(Icons.Default.Person, null) },
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .testTag("login_identifier_input"),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text("Password") },
-                leadingIcon = { Icon(Icons.Default.Lock, null) },
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("login_password_input"),
-                singleLine = true
-            )
-
-            Button(
-                onClick = { onLogin(identifier, password) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .testTag("submit_login_button"),
-                shape = RoundedCornerShape(12.dp)
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("Sign In with Credentials", fontWeight = FontWeight.Bold)
-            }
-        } else {
-            // Sign Up Form
-            OutlinedTextField(
-                value = regUsername,
-                onValueChange = { regUsername = it },
-                label = { Text("Username") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VerifiedUser,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Firebase Authentication & RBAC",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
 
-            OutlinedTextField(
-                value = regEmail,
-                onValueChange = { regEmail = it },
-                label = { Text("Email Address") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
+                Text(
+                    text = "Sign in with your Google account. Your assigned role (ADMIN, MODERATOR, ADVISOR, or MEMBER) is automatically fetched from the 'users/{uid}' collection in Cloud Firestore and enforced across the platform.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
 
-            OutlinedTextField(
-                value = regDisplayName,
-                onValueChange = { regDisplayName = it },
-                label = { Text("Full Name / Title") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = regPassword,
-                onValueChange = { regPassword = it },
-                label = { Text("Password (min 6 characters)") },
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-
-            // Role selection
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text("Select Account Role:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(4.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    UserRole.values().forEach { role ->
-                        FilterChip(
-                            selected = regRole == role,
-                            onClick = { regRole = role },
-                            label = { Text(role.displayName, fontSize = 11.sp) }
+
+                // 2. Interactive Sign-In (Explicit Button Click)
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            localError = null
+                            isSigningIn = true
+                            val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                                .build()
+
+                            val request = GetCredentialRequest.Builder()
+                                .addCredentialOption(signInWithGoogleOption)
+                                .build()
+
+                            try {
+                                val result = credentialManager.getCredential(context, request)
+                                handleSignInResult(result.credential)
+                            } catch (e: GetCredentialCancellationException) {
+                                Log.w("Auth", "Sign-in cancelled by user", e)
+                            } catch (e: GetCredentialException) {
+                                Log.w("Auth", "Interactive sign-in failed", e)
+                                localError = e.message ?: "Google Sign-In could not be completed."
+                            } catch (e: Exception) {
+                                Log.w("Auth", "Firebase sign-in failed", e)
+                                localError = e.message ?: "Authentication failed."
+                            } finally {
+                                isSigningIn = false
+                            }
+                        }
+                    },
+                    enabled = !isSigningIn,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .testTag("google_sign_in_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    if (isSigningIn) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
                         )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("Authenticating...", fontWeight = FontWeight.Bold)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("Sign in with Google", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
                 }
             }
-
-            Button(
-                onClick = { onRegister(regUsername, regEmail, regPassword, regDisplayName, regRole) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .testTag("submit_register_button"),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Text("Register Account", fontWeight = FontWeight.Bold)
-            }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
-        HorizontalDivider()
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
 
-        // 1-Tap Quick Persona Logins for instant evaluation
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = "Instant RBAC Persona Login:",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = "Tap any role to immediately test its secure dashboard and permission boundaries",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            val personas = listOf(
-                Triple("usr_admin", "Dr. Arthur Pendelton (Admin)", EduRoseDanger),
-                Triple("usr_moderator", "Elena Rostova (Moderator)", EduCyanModerator),
-                Triple("usr_advisor", "Prof. Marcus Vance (Advisor)", EduVioletAdvisor),
-                Triple("usr_student", "Maya Lin (Member)", EduBlueLight)
-            )
-
-            personas.forEach { (uid, label, color) ->
-                OutlinedButton(
-                    onClick = { onQuickLoginPersona(uid) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .testTag("quick_login_$uid"),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Box(modifier = Modifier.size(8.dp).background(color, RoundedCornerShape(2.dp)))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = label, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                }
-            }
-        }
+private suspend fun handleSignInResult(credential: Credential) {
+    if (credential is CustomCredential &&
+        credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+    ) {
+        val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+        val firebaseCredential = GoogleAuthProvider.getCredential(googleIdTokenCredential.idToken, null)
+        Firebase.auth.signInWithCredential(firebaseCredential).await()
+    } else {
+        Log.w("Auth", "Unexpected credential type: ${credential.type}")
     }
 }

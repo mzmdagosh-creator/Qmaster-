@@ -2,22 +2,70 @@ package com.example.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.R
 import com.example.data.local.AppDatabase
 import com.example.data.model.*
+import com.example.data.remote.OperationType
+import com.example.data.remote.handleFirestoreError
 import com.example.data.repository.*
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+@OptIn(ExperimentalCoroutinesApi::class)
+class MainViewModel(
+    application: Application,
+    private val currentUserId: String = Firebase.auth.currentUser!!.uid,
+    private val userEmail: String = Firebase.auth.currentUser?.email ?: "",
+    private val userDisplayName: String = Firebase.auth.currentUser?.displayName ?: ""
+) : AndroidViewModel(application) {
+
     private val database = AppDatabase.getInstance(application)
+    private val databaseId = application.getString(R.string.firestore_database_id)
+    private val firestore = FirebaseFirestore.getInstance(databaseId)
+    private val firestoreUserRepo = FirestoreUserRepository(firestore)
+
     private val authRepo = AuthRepository(database)
     private val questionRepo = QuestionRepository(database)
     private val quizRepo = QuizRepository(database)
     private val moderationRepo = ModerationRepository(database)
     private val advisorRepo = AdvisorRepository(database)
     private val auditRepo = AuditRepository(database)
+
+    private val _authError = MutableStateFlow<String?>(null)
+    val authError: StateFlow<String?> = _authError.asStateFlow()
+
+    private val _isLoadingRole = MutableStateFlow(true)
+    val isLoadingRole: StateFlow<Boolean> = _isLoadingRole.asStateFlow()
+
+    // Real-time stream of the user's document in Firestore (`users/{uid}`)
+    // using the Two-Tier Error Handling Pattern (.map + .catch + .stateIn)
+    val firestoreUserProfile: StateFlow<FirestoreUserProfile?> = firestoreUserRepo
+        .observeUserProfile(currentUserId)
+        .onEach { profile ->
+            if (profile != null) {
+                authRepo.syncAuthenticatedUser(profile.toUserEntity())
+                _isLoadingRole.value = false
+            }
+        }
+        .catch { e ->
+            handleFirestoreError(e as? Exception ?: Exception(e), OperationType.GET, "users/$currentUserId")
+            _authError.value = "Failed to load role from Firestore: ${e.localizedMessage ?: "Permission denied"}"
+            _isLoadingRole.value = false
+            emit(null)
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = null
+        )
 
     val currentUser = authRepo.currentUser.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val allUsers = authRepo.observeAllUsers().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -76,45 +124,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val allRecommendations = advisorRepo.observeAllRecommendations()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private val _authError = MutableStateFlow<String?>(null)
-    val authError: StateFlow<String?> = _authError.asStateFlow()
-
     init {
-        // Auto-login default persona (Admin) on first run
-        viewModelScope.launch(Dispatchers.IO) {
-            authRepo.autoLoginDefaultUser()
-        }
+        fetchAndEnsureFirestoreRole()
     }
 
-    fun login(identifier: String, pass: String) {
+    /**
+     * Fetches the authenticated user's role from `users/{uid}` in Cloud Firestore
+     * (or initializes a default MEMBER document if none exists yet) and applies
+     * the corresponding role permissions.
+     */
+    fun fetchAndEnsureFirestoreRole() {
         viewModelScope.launch(Dispatchers.IO) {
+            _isLoadingRole.value = true
             _authError.value = null
-            val result = authRepo.login(identifier, pass)
-            result.onFailure {
-                _authError.value = it.message ?: "Authentication failed."
+            val result = firestoreUserRepo.ensureAndFetchUserProfile(
+                uid = currentUserId,
+                email = userEmail,
+                displayName = userDisplayName
+            )
+            result.onSuccess { profile ->
+                authRepo.syncAuthenticatedUser(profile.toUserEntity())
+            }.onFailure { e ->
+                _authError.value = "Could not fetch user role from Firestore: ${e.localizedMessage ?: "Unknown error"}"
             }
+            _isLoadingRole.value = false
         }
     }
 
-    fun register(user: String, email: String, pass: String, name: String, role: UserRole) {
+    fun clearSession() {
         viewModelScope.launch(Dispatchers.IO) {
-            _authError.value = null
-            val result = authRepo.register(user, email, pass, name, role)
-            result.onFailure {
-                _authError.value = it.message ?: "Registration failed."
-            }
-        }
-    }
-
-    fun switchUserPersona(userId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            authRepo.switchUserPersona(userId)
-        }
-    }
-
-    fun logout() {
-        viewModelScope.launch(Dispatchers.IO) {
-            authRepo.logout()
+            authRepo.clearSession()
         }
     }
 
@@ -165,7 +204,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateUserRole(userId: String, newRole: UserRole) {
         val user = currentUser.value ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            authRepo.updateUserRole(user, userId, newRole)
+            try {
+                authRepo.updateUserRole(user, userId, newRole)
+                firestoreUserRepo.updateUserRole(userId, newRole)
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.UPDATE, "users/$userId")
+            }
         }
     }
 
@@ -220,6 +264,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val withUser = attempt.copy(userId = user.id)
             val answersWithAttempt = answers.map { it.copy(quizAttemptId = withUser.id) }
             quizRepo.submitQuizAttempt(user.id, withUser, answersWithAttempt)
+        }
+    }
+
+    class Factory(
+        private val application: Application,
+        private val currentUserId: String,
+        private val userEmail: String,
+        private val userDisplayName: String
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            return MainViewModel(
+                application = application,
+                currentUserId = currentUserId,
+                userEmail = userEmail,
+                userDisplayName = userDisplayName
+            ) as T
         }
     }
 }
